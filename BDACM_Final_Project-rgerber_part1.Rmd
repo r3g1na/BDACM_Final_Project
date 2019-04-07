@@ -1,0 +1,239 @@
+---
+title: "Final Project BDACM"
+date: 'Due: Thursday, February 28th'
+author: "Regina Gerber"
+output:
+  html_document
+---
+  
+  
+# Final Project Bayesian Data Analysis and Cognitive Modelling - Part 1: Visualization
+  
+The dataset here is a sample of the transactions made in a retail store. 
+The store wants to know better the customer purchase behaviour against different products. 
+Specifically, here the problem is a regression problem where we are trying to predict the dependent variable (the amount of purchase) with the help of the information contained in the other variables.
+
+## 0. Loading required packages
+
+```{r, eval=TRUE}
+
+# Required R packages
+library(tidyverse)
+library(BSDA)
+library(cowplot)
+library(GGally)
+library(scales)
+library(ggpubr)
+library(brms)
+
+# set cores to use to the total number of cores (minimally 4)
+options(mc.cores = max(parallel::detectCores(), 4)) 
+
+lastname <- "gerber"
+```
+
+___
+
+## 1. Inspecting the Data
+
+#### 1a) Loading the data
+
+Description: The Data contains 12 different variables and 537.577 rows:
+"User_ID" (nominal), "Product_ID"(nominal), "Gender"(binary/nominal), "Age"(7-level ordinal), "Occupation"(nominal/ordinal?), "City_Category"(nominal), "Stay_In_Current_City"(count), "Marital_Status"(binary), "Product_Category_1"(nominal), "Product_Category_2"(nominal),"Product_Category_3"(nominal), "Purchase"(metric). 
+Some varibles cannot be interpreted directly as they are masked ("Product_ID", "Occupation", "City_Category", "Marital_Status").
+
+The first variables are defined as the predictor (or independent) variables, the last is the predicted (or dependent) variable. In other words: We want to predict "Purchase" by the combination of the other variables.
+
+```{r, eval=TRUE}
+
+bf_data<-read.csv(file="C:/Users/regina/Desktop/DSproject/original_bf_data.csv", header = TRUE, sep = ",")
+
+#Print the Column Names and the 10 first data points
+head(bf_data, n=10)
+  
+#Print a statistical summary of all factors   
+summary(bf_data)
+
+```
+
+
+___
+#### 1b) Exploring the data
+
+For our purposes we will drop(*) the variables "City_Category", "Stay_in_current_Years", "Occupation", "Product_Category_1", "Product_Category_2", and "Product_Category_3" to reduce the complexity in following ways: 1) reduce the amount of possible predictor variables, 2) reduce the types of possible predictor variables by discarding "Stay_in_current_Years" as a count-variable, 3) to outscope possible misinterpretations of the variable types "Occupation" (ordinal vs. nominal) and their meaning (partly hidden by masking).
+
+
+Thus, our resulting predictor variables contain following types:
+* *binary/binomial*
+  + _Gender_, 
+  + _Marital Status_, 
+* *nominal* 
+  + _User_ID_, 
+  + _Product_ID_,
+* *ordinal* 
+  + _Age_ 
+
+predicting a metric (dependent) variable: Purchase.
+
+Within the rows the varaible "User_ID" shows, that some customers are listet several times. This should be kept in mind for further analysis.
+Additionally, we should check for missing values.
+
+ 
+(*)side-note:
+Instead of an uninformed dropping of information, it is more sensible to discard single factors that yields less to the explanation of the data. One commonly used method to find those factors is to conduct a Principle Component Analysis, which is a mathematical procedure of dimension reduction that transforms a number of possible correlated variables into a smaller number of uncorrelated variables (called principle component)(Guo, Wu, Massart, Boucon & de Jong, 2002). Yet, since our data is strongly heterogeneous, that is, it contains continuous and categorical variables, we are not allowed to use Principle Component Analysis (PCA)(used for continuous data only) or Multiple Correspondence Analysis (MCA) (used for nominal categorical data only) to detect an underlying structure in our data set. Instead, we can use Factor Analysis for Mixed Data, which is a principle component method to explore data with both continous and categorical variables (for further information see FAMD {FactorMineR}).
+However, this procedure is theoretically quite complex and additionally costly in term of processing power, therefore, I skipped it out and arbitrarily dropped some factors that may be less infomrative.
+
+
+#### 1c) Preparing the data
+We will remove some columns and check the levels of the different factors
+
+```{r, eval=TRUE}
+
+#Remove columns/variables we are not interested in
+
+new_bf_data <- bf_data %>%  subset(select = -c(Stay_In_Current_City_Years,City_Category,Occupation, Product_Category_1,Product_Category_2, Product_Category_3 )) %>%  mutate(Marital_Status = factor(Marital_Status)) 
+
+head(new_bf_data)
+
+write.csv(new_bf_data,file="C:/Users/regina/Desktop/DSproject/new_bf_data.csv")
+
+# Check the different levels of the variables/factors: 
+
+# How many actual customers are there?
+all_User_IDs<- unique(bf_data$User_ID)
+n_user_id<-bf_data %>% group_by(User_ID) %>% summarize(count=n())
+paste0("There are ",
+      count(n_user_id),
+      " different Customers.")
+
+# How many differenct Product_IDs are there?
+all_Product_IDs<- unique(bf_data$Product_ID)
+m_product_id<-bf_data %>% group_by(Product_ID) %>% summarize(count=n())
+paste0("There are ",
+      count(m_product_id),
+      " different Products")
+
+# How many different age classes are there?
+age_classes<-bf_data %>% group_by(Age) %>% summarize(count=n())
+paste0("There are ",
+      count(age_classes),
+      " different Age classes.Following Age classes are defined: ")
+print(age_classes$Age)
+
+
+
+# Are there missing values? Where and how often?
+for (Var in names(bf_data)) {
+    missing <- sum(is.na(bf_data[,Var]))
+    if (missing > 0) {
+        print(c(Var,missing))
+    }
+}
+
+```
+
+___
+
+##2. Visualizing the data (under the Research Question) 
+ "Is there a Difference in Purchase between males and females?""
+
+Let's first have some differend visualizations of the variables.
+
+#### 2a) Plotting histograms and density plots.
+
+```{r, eval=TRUE}
+
+#Histogram Purchase
+bf_data %>% ggplot(mapping=aes(x=Purchase), xlab="Purchase", ylab="Count")+
+  geom_histogram(binwidth = 3)
+
+
+#density plot of the Purchase  with respect to the groups "female" and "male", including group average
+group_avg <- mean(bf_data$Purchase)
+bf_data %>%
+  ggplot(mapping = aes(x = Purchase, fill = Gender)) +
+  geom_density(alpha = 0.5) +
+  geom_vline(xintercept = group_avg, color = "firebrick")
+  theme_classic()
+  
+
+```
+
+Interpretation:
+The density plot shows that the data is rather "spread" across different intervals. Since we have to guarantee that the samples are drawn from a normal distribution (in order to account for a frequentist approach), we have to check the prerequisite. This can be done visually with an additional qqplot (or quantile-quantile plot).
+
+
+#### 2b) Plotting a QQ-Plot
+
+```{r, eval=TRUE}
+
+#qq-plot of purchase for visually inspecting the data for the normality assumption 
+# (that residuals are normally distributed)
+
+ggqqplot(bf_data$Purchase)
+
+```
+
+
+Interpretation:
+The plot looks heavily tailed (according to https://stats.stackexchange.com/questions/101274/how-to-interpret-a-qq-plot). This is logical because the vairable Purchase entails at least natural boundaries (a lower boundary at zero). We should keep that in mind, especially if we are dealing with methods from the frequentist point of view, in which assumptions about the underlying distribution play a crucial role. Additionally, we should keep it in mind when we build our model, i.e. in terms of choosing a more robust distribution or a distribution entailing boundaries.
+
+
+#### 2c) More paired plots
+Furthermore, it can be useful to visually inspect the relations between Age, Purchase and Gender by plotting all variables against each other.
+
+```{r, eval=TRUE}
+
+p1<- bf_data %>%
+  ggpairs(mapping = aes(color = Gender), title= "Relations",columns = c("Age", "Purchase", "Gender"))
+p1
+
+#retrieve the second row, third column plot (Boxplot Purchase x Gender)
+p <- p1[2,3]
+p <- p + aes(color = Gender)
+
+p
+```
+
+
+Interpretation:
+The boxplot seems more interesting regarding our first research question: "Is there a Difference in Purchase between males and females?". The boxplot shows, that there are some outliers in both groups. The ranges and the means between the groups do not appear to be far away from each other. Let's check.
+
+```{r, eval=TRUE}
+
+#Calculate mean, sd, min, max for the two groups
+bf_gender_purchase <- bf_data %>% group_by(Gender) %>% 
+  summarise(mean_purchase= mean(Purchase), sd_purchase = sd(Purchase), min_purchase = min(Purchase), 
+            max_purchase = max(Purchase))
+print(bf_gender_purchase)
+
+ # create a summary of mean freq and standard error
+bf_data %>%  summarize(mean_purchase = mean(Purchase),
+            standard_error = plotrix::std.error(Purchase))
+
+
+```
+Interpretation:
+Indeed, the mean in amount of Purchase does not vary that much between the two groups. The minimum and maximum are quite similar. We will check in the second Part: Modelling if the difference is significant or not.
+
+
+
+#### 2d) Check for (Multi-)Colinearity
+Colinearity is a linear association between two predictor/ explanatory variables. In multicolinearity more than two explanatory variables are involved.
+In other words, if two or more independent variables are perfectly colinear, one variables is an exact linear combination of the other(s). 
+Commonly such a relation between variables can be observed by a scatterplot matrix.
+
+```{r, eval=TRUE}
+# Basic Scatterplot Matrix
+pairs(~Age+Marital_Status+Purchase+Gender,data=bf_data, 
+   main="Simple Scatterplot Matrix")  
+
+```
+
+
+Interpretation:
+Apparently, the visualization of (Multi-) Colinearity cannot be done by a simple scatterplot matrix for categorical variables. For further investigation one should consider other alternatives. 
+
+__
+
+Continue with Part2: 2.Modelling

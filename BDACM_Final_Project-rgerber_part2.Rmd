@@ -1,0 +1,340 @@
+---
+title: "Final Project BDACM"
+date: 'Due: Thursday, February 28th'
+author: "Regina Gerber"
+output:
+  html_document
+---
+  
+  
+# Final Project Bayesian Data Analysis and Cognitive Modelling - Part 2: Modelling
+
+
+## 0. Loading required packages
+
+```{r, eval=TRUE}
+
+# Required R packages
+library(tidyverse)
+library(BSDA)
+library(cowplot)
+library(GGally)
+library(scales)
+library(ggpubr)
+library(brms)
+library(rstan)
+library(ggmcmc)
+
+# set cores to use to the total number of cores (minimally 4)
+options(mc.cores = max(parallel::detectCores(), 4)) 
+# save a compiled version of the Stan model file
+rstan_options(auto_write = TRUE)
+
+
+lastname <- "gerber"
+```
+
+___
+
+## 1. Loading the data
+```{r, eval=TRUE}
+
+new_bf_data<-read.csv(file="C:/Users/regina/Desktop/DSproject/new_bf_data.csv", header = TRUE, sep = ",")
+
+#converting to tibble dataframe
+new_bf_data <-as.tibble(new_bf_data)
+
+#drop the additionally inserted index column X
+new_bf_data <- new_bf_data %>%  subset(select = -c(X))
+
+#Print the Column Names and the 10 first data points
+head(new_bf_data, n=10)
+
+
+```
+
+## 2. Frequentist t-test under the first research question
+
+"Is there a difference in mean purchase between male and femal customers?"
+
+To answer this question we first calculate some statistics (mean, sd, max, min) for both genders seperately. Under following hypothesis we then conduct the inbuilt t-test:
+
+
+```{r, eval=TRUE}
+
+#Calculate mean, sd, min, max for the two groups
+bf_gender_purchase <- new_bf_data %>% group_by(Gender) %>% 
+  summarise(mean_purchase= mean(Purchase), sd_purchase = sd(Purchase), min_purchase = min(Purchase), 
+            max_purchase = max(Purchase))
+print(bf_gender_purchase)
+
+#Is this difference significant? Let's t-test...
+# H0= mu_f= mu_m
+# H1= mu_f 1= mu_m
+
+female_data <- new_bf_data %>%
+  filter(Gender == "F")
+
+male_data <- new_bf_data %>%
+  filter(Gender == "M")
+
+t.test(x = male_data$Purchase,
+       y = female_data$Purchase, var.equal = TRUE, paired = FALSE)
+
+
+```
+
+Interpretation of the results:
+The p-value is p < 2.2e-16, which indicates, that the test result is significant (below 0.05). Therefore, we reject the null-hypothesis (that the means are equal in both groups) and adopt the research hypothesis that the amount of Purchase is different for males and females.
+
+
+## 3. Preparing the data for further analysis
+
+####3a) For later purposes we will dummy code the data as following:
+
+Gender --> Female=1, Male=0,
+Age --> (0-17)= 1, (18-25)=2, (26-35)=3, (36-45)=4, (46-50)=5, (51-55)=6, (55+)=7
+
+(sidenote: this step could be redundant as we will dummy code once again in a latter part)
+
+```{r, eval=TRUE}
+
+#prepare data for analysis_ordinal data
+
+# new_bf_data <- new_bf_data %>%   
+#   mutate(Gender = ifelse(Gender == "F", 1, 0),
+#          Age = ifelse(Age == "0-17", 1,
+#                       ifelse(Age =="18-25", 2,
+#                              ifelse(Age =="26-35",3,
+#                                           ifelse(Age =="36-45", 4,
+#                                                  ifelse(Age =="46-50",5,
+#                                                           ifelse(Age =="51-55", 6, 
+#                                                                  ifelse(Age =="55+", 7, "error"))))))))
+# 
+# head(new_bf_data)
+
+```
+
+#### 3b) Converting into factors
+
+Then we further prepare the data by converting the predictors to factors. Especially for categorical predictors we have to make sure that they are seen by R as factors 
+and not as numeric.
+
+```{r, eval=TRUE}
+
+new_bf_data <- new_bf_data %>%
+  mutate(User_ID = factor(User_ID),Product_ID = factor(Product_ID), Gender = factor(Gender),
+         Age=factor(Age), Marital_Status=factor(Marital_Status))
+head(new_bf_data)
+
+```
+
+#### 3c) Split the data set
+
+Because of limited computational capacities, (sorry, my computer had astronomic running times using the brm package) I will just pick a fraction of the data set, that is 20%. It is picked randomly without replacement to avoid the introduction of any biases. 
+
+```{r, eval=TRUE}
+
+my_data_fraction <- new_bf_data %>% sample_frac(0.2, replace = FALSE)
+head(my_data_fraction)
+
+```
+
+
+## 4. Building our models
+
+sidenote regarding lm() and glm():
+LMs (Linear Models) are a subset or special case of GLMs (Generalized Linear Models). lm() fits models of the form: Y = XB + e where e~Normal( 0, s2 ). glm() fits models of the form g(Y) = XB + e, where the function g() and the sampling distribution of e need to be specified. The function 'g' is called the "link function". The default link function for glm is the "identity function" such that g(Y) = Y, and the default error distribution is Normal. With these defaults glm() is fitting the same model fit by lm(). In GLMs the relation between the regressors and the target is not strictly linear, but under a transformation (the link function) they are. A GLM model helps to resolve the core weakness of the standard linear model, that the errors have to be normally distributed (and homoscedastic) for all of the assumptions of the lm to be met. 
+Since our predicted variable does not seem to be drawn from a normal distribution (two reasons: 1st it is heavily tailed (as we have seen in the QQ-plot in the visualization part), 2nd it is truncated by zero, because it contains only strictly positive values) one solution is to explicitly specify the family distribution of our model and a prior. This can most flexibly be done with the help of the brms package.The brm() function guarantees this flexibility though the possibility to assume various different types of distribution functions and let you specify a wide range of priors.
+For our case we could use family distributions, which fit "Survival Models" (Bürkner, P. (2019, March 14). Parameterization of Response Distributions in brms. Retrieved March 07, 2019, from https://cran.r-project.org/web/packages/brms/vignettes/brms_families.html), 
+which are: lognormal,Gamma, weibull, and inverse Gaussian. We have to specify the model distribution because by default it will assume a Gaussian Distribution with the identity link function.
+
+#### 4a) Build the null model(s)
+
+Let us first build the null model (i.e., a model with a random effects grouping structure (gender), but no fixed-effects predictors). It is the equivalent to the frequentist approach of a t-test. It tests our fist hypothesis if the mean of the variable Purchase is different for the both Gender groups.
+By default the family distribtions are assumed to be the Gaussian Normal Distribution and an identity link function. However, we have seen that this distribution does not really fit our model. Thus, I will try out several other distributions to model our data. We will start with a lognormal distribtion, which is suitable for modelling data, which is strictly positive and has longer upper tails (right skewed). The distribution is semi-bounded and unimodal (Log-normal distribution. (n.d.). Retrieved March 07, 2019, from http://wiki.analytica.com/index.php?title=Log-normal_distribution).
+
+By default the brm() function runs 4 MCMC chains, each with an iteration of 2000 samples, and a warmup of 1000.
+
+Since bayesian models use MCMC to estimate posterior samples it takes a while for the model to compute. Therefore, I will save each model fit outside the the script to be able to load it again without repeatedly running (adapted from Kurz, S. (2018, September 26). Statistical Rethinking with brms, ggplot2, and the tidyverse. Retrieved March 5, 2019, from https://bookdown.org/ajkurz/Statistical_Rethinking_recoded/horoscopes-insights.html).
+
+Afterwards, I will apply some visual diagnostics: the traceplots (which show the values the parameter took during the runtime of the chain), and (marginal) density plots (which is the smoothened histogram of the values in the trace-plot, i.e. the distribution of the values of the parameter in the chain) of MCMC samples for visual diagnostics. 
+
+```{r, eval=TRUE}
+
+brm_fit0 <- brm(Purchase ~ 1 + (1|Gender), 
+                     data = my_data_fraction, family = lognormal, control = list(adapt_delta = 0.99),
+                  iter=2000, warmup=1000, thin=1, chains=4, cores=4)
+
+#save the model as file
+save(brm_fit0, file = "brm_fit0.rda")
+
+#remove to save memory capacity
+#rm(brm_fit0)
+load("brm_fit0.rda")
+
+#show summary statistics about convergence of chains, effective sample size, 
+#estimates and confidence intervals of estimated parameters
+summary(brm_fit0)
+
+#plot trace and density plots of MCMC samples for visual diagnostics 
+plot(brm_fit0)
+
+```
+
+Interpretation of the results: 
+First of all, we see under the part "Group_Level Effects" that R recognized the factor Gender as an categorical variable with two levels. The summary further shows a Rhat value below 1.1, indicating that the MCMC chains converged. The effective sample size is relative low, indicating a (possibly) strong autocorrelation within the chains. (I will explore this effect by adjusting the adapt_delta stepsize of the proposals in a next step, but first let's have a look on the estimates.) 
+All calculated estimates of the posterior distributionlay, group level intercept, population level intercept, and sigma within the calculated confidence intervals, which does not include zero (but sometimes are near to zero) implying a small significant effect on the predictor (http://www.flutterbys.com.au/stats/tut/tut7.2b.html). However, especially for the first two the estimated error is quite high. The sigma estimate is not reliable different from zero. 
+Inspecting the plots, especially the second row regarding the group level intercept attracts one's attention. The density plot is heavily skewed, the trace plot heavily distorted. 
+This could indicate, that the MCMC algorithm was not able to generate unbiased estimates of the parameter. However, I am not really sure, because this variable is the only categorical one. 
+
+###### 4a.a) Little excursion to the effect of adjusting the stepsize
+
+Now let's explore the effect on the amount of effective sample sizes by lowering the stepsize using the adapt_delta parameter. 
+
+```{r, eval=TRUE}
+
+brm_fit0_delta <- brm(Purchase ~ 1 + (1|Gender), 
+                     data = my_data_fraction, family = lognormal, control = list(adapt_delta = 0.8),
+                  iter=2000, warmup=1000, thin=1, chains=4, cores=4)
+
+#save the model as file
+save(brm_fit0_delta, file = "brm_fit0_delta.rda")
+
+#remove to save memory capacity
+#rm(brm_fit0_delta)
+load("brm_fit0_delta.rda")
+
+#show summary statistics about convergence of chains, effective sample size, 
+#estimates and confidence intervals of estimated parameters
+summary(brm_fit0_delta)
+
+```
+
+Interpretation: 
+As expected, the effective sample size went down with the default value of the adapt_delta = 0.8. 
+This in reasonable, because the step size decreases (in contrast to adapt_delta=0.99), proposing for sample draws which are "near" each other, thus, depending on each other. This reduces the effectivity of sampling. Thus, we will stick to an adapt_delta value of 0.99. The summary further shows, that the estimated error for all parameters went down, and the confidence intervals narrowed.
+Nonetheless, we will stick to a step size of 0.99, because the effective sample size is decisive for the quality of our data, and, consequently for our estimates.
+
+#### 4b) Other distribution functions for the null model
+
+Assuming the lognormal distribtuion for our first model is just one possibilty to model our data. Frequently, an inverse normal distribution is used instead as it has the same properties (semi-bounded, unimodal) as the lognormal distribution. Additionally, I will try to model the data with a Gamma distribution. I will compare those models against each other (for the moment only the summary statistics and the plot). 
+Notice, that there are several other alternatives to specify the distribution family (also self-defined), and the possibility to set (maybe more adequate) priors, which I will not further explore. 
+
+
+```{r, eval=TRUE}
+
+brm_fit0_Gamma <- brm(Purchase ~ 1 + (1|Gender), 
+                     data = my_data_fraction, family = Gamma, 
+                     control = list(adapt_delta = 0.99),
+                  iter=2000, warmup=1000, thin=1, chains=4, cores=4)
+brm_fit0_inverseG <- brm(Purchase ~ 1 + (1|Gender), 
+                     data = my_data_fraction, family = inverse.gaussian, 
+                     control =list(adapt_delta = 0.99),
+                  iter=2000, warmup=1000, thin=1, chains=4, cores=4)
+
+
+#save the models as file
+save(brm_fit0_Gamma, file = "brm_fit0_Gamma.rda")
+save(brm_fit0_inverseG, file = "brm_fit0_inverseG.rda")
+
+#rm(brm_fit0_Gamma)
+#rm(brm_fit0_inverseG)
+load("brm_fit0_Gamma.rda")
+load("brm_fit0_inverseG.rda")
+
+#show summary statistics about convergence of chains, effective sample size, 
+#estimates and confidence intervals of estimated parameters, and trace and density plots of MCMC #samples for visual diagnostics 
+summary(brm_fit0_Gamma)
+plot(brm_fit0_Gamma)
+
+summary(brm_fit0_inverseG)
+plot(brm_fit0_inverseG)
+
+```
+
+Interpretation:
+1. The model brm_fit0_Gamma shows increased Rhat values and less effective sample sizes compared to our original model. The trace plots confirm the summary statistic. Thus, this model distribution does not seem to fit our data. 
+2. Also the model brm_fit0_inverseG shows increased Rhat values and less effective sample sizes compared to our original model. Thus, these model distribution does not seem to fit our data.
+
+Therefore, we will stick to our original model and assume an lognormal distribution.
+This will be the ground model, which I will expand to build more complex models in the following part. 
+
+Notice: the quality of our model and the MCMC process itself could be also improved by varying the priors. However, I will skip this possibility for my purposes and maintain the default prior waekly informative improper flat prior. 
+
+##### Intermediate conclusion regarding the first research question
+
+After seeing different models for the null model, the first model with the lognormal distribution seem to fit most our data. Regarding our first research question "Is there a difference in mean purchase between male and femal customers?" we can conclude from the brm_fit0 model, that there could be a difference in means, because the estimates (especially group-level effect) is different from zero. However, this effect seem to be quite small. 
+
+
+#### 4c) Build more models
+
+I will build the model incrementally. But first, I will start with some fixed effect models (FE), also called population-level effects or main effects, to explore the impact of an individual factor on the predicted variable. I will start with the factor Marital_Status because it is simpler due to its amount of two levels (equivalent to Gender), where the level 0 is the reference group due to dummy coding. Subsequently, I will try to model main effects based on the factor Age.
+
+```{r, eval=TRUE}
+
+#model brm_fit1_Marital_Status has only has fixed effects. 
+#It tries to explain Purchase in terms of Marital_Status
+brm_fit1_Marital_Status <- brm(Purchase ~ Marital_Status , 
+                data= my_data_fraction, family=lognormal,
+                control = list(adapt_delta = 0.99),
+                iter=2000, warmup=1000, thin=1, chains=4, cores=4)
+
+
+save(brm_fit1_Marital_Status, file = "brm_fit1_Marital_Status.rda")
+#rm(brm_fit1_Marital_Status)
+load("brm_fit1_Marital_Status.rda")
+
+summary(brm_fit1_Marital_Status)
+plot(brm_fit1_Marital_Status)
+
+
+```
+
+Interpretation: 
+The model FE model brm_fit1_Marital_Status shows convergence and a sufficient large effective sample size. Also a visual exploration of the plots shows a satisfactory sampling behaviour. Therefore, the estimations are quite trustworthy and can be interpreted. 
+The summary shows that the factor Marital_Status is not different from zero (the two-sided CI inclued 0), indicating that this factor does not contribute to the predicted variable. Thus, I will leave the factor out in further analysis steps.
+
+Now let's construct a fixed effect model predicted by the factor Age. Since Age contains 7 levels, we first have to dummy code those, and then compare the contrasts with each other (adapted from Bruin, J. (2006). R Library Contrast Coding Systems for Categorical Variables. Retrieved from https://stats.idre.ucla.edu/r/library/r-library-contrast-coding-systems-for-categorical-variables/)
+
+```{r, eval=TRUE}
+
+#make sure that R sees Age as a factor with following levels
+my_data_fraction$Age.f = factor(my_data_fraction$Age, labels=c("1", "2", "3", "4", "5", "6", "7"))
+
+#let's take a look on a contrast matrix for categorical variable with 7 levels,
+#where 1 represents the reference level
+contr.treatment(7)
+
+#assigning the treatment contrasts to Age.f
+contrasts(my_data_fraction$Age.f) = contr.treatment(7)
+
+#this model tries to explain Purchase in terms of Age
+brm_fit1_Age <- brm(Purchase ~ Age.f , 
+                data= my_data_fraction, family=lognormal,
+                control = list(adapt_delta = 0.99),
+                iter=1000, warmup=100, thin=1, chains=4, cores=4)
+
+save(brm_fit1_Age, file = "brm_fit1_Age.rda")
+#rm(brm_fit1_Age)
+load("brm_fit1_Age.rda")
+
+summary(brm_fit1_Age)
+plot(brm_fit1_Age)
+
+```
+
+Interpretation:
+The summary statics shows an Rhat value below 1.1 and a large number of effective samples, indicating that the samples estimates are trustworthy. A visual inspection of the trace and density plots confirms the summary statistic.
+The parameter estimate for the first contrast compares the mean of the dependent variable, Purchase, for levels 1 and 2 yielding 0.04. The results of the second contrast, comparing the mean of Purchase for levels 1 and 3, and so on. Notice that the intercept estimate of 8.97 corresponds to the mean for the reference group 1: Age between 0 and 17.
+Alarmingly, all estimated two-sided confidence intervals include zero. Thus, it seems evident, that the factor age does not affect the predicted variable. 
+
+#### 4d) Building models with increasing complexity
+
+Since our fixed effect models do not seem to indicate any contribution of the factors Age, Marital_Status, and only a a possibly small contribution of the factor Gender, I will stop analysis here.
+
+However, when ignoring our already gained knowledge about the affects of the predictor variables on our predicted variable one could build more complex models, including interactions between different factors, e.g. Age*Marital_Status, or including random slopes and intercepts (mixed effect structures).
+
+___
+
+End of Final Project
